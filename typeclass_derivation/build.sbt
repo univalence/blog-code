@@ -1,5 +1,5 @@
 
-name := "typeclass_2"
+name := "typeclass_derivation"
 
 scalaVersion := "2.12.8"
 
