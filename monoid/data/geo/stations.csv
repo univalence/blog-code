@@ -1,4 +1,5 @@
-station_name,station_rating,station_review_count,city,postal_code,county,departement,region,latitude,longitudeLus la Jarjatte,5.0,1,Lus-la-Croix-Haute,26620,Die,Drôme,Auvergne-Rhône-Alpes,44.679971,5.7661523
+station_name,station_rating,station_review_count,city,postal_code,county,departement,region,latitude,longitude
+Lus la Jarjatte,5.0,1,Lus-la-Croix-Haute,26620,Die,Drôme,Auvergne-Rhône-Alpes,44.679971,5.7661523
 Panticosa,5.0,1,,,,,,,
 Formigal,4.5,21,,,,,,,
 Cerler,4.5,10,,,,,,,
