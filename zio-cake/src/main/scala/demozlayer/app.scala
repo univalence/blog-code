@@ -1,5 +1,7 @@
 package demozlayer
 
+import java.io.{ File, FileOutputStream, PrintWriter }
+
 import demozlayer.counter.Counter
 import demozlayer.logger.Logger
 import zio.clock.Clock
@@ -94,6 +96,15 @@ object MyApp0 extends zio.App {
   }
 }
 
+object Types {
+
+  type Task[+A]     = ZIO[Any, Throwable, A] // Returns `A`, can fails with `Throwable`, depends on nothing (`Any`).
+  type RIO[-R, +A]  = ZIO[R, Throwable, A]   // Like `Task`, but depends on `R`.
+  type UIO[+A]      = ZIO[Any, Nothing, A]   // Always returns A, never fails (`Nothing`), depends on nothing (`Any`).
+  type URIO[-R, +A] = ZIO[R, Nothing, A]     // Like `UIO`, always return `A`, never fails, depends on `R`.
+  type IO[+E, +A]   = ZIO[Any, E, A]         // Returns `A`, can fails with `E` .
+}
+
 object MyApp1 extends zio.App {
 
   override def run(args: List[String]): URIO[zio.ZEnv, ExitCode] =
@@ -111,13 +122,13 @@ object MyApp1 extends zio.App {
           override def info(message: => String): UIO[Unit] =
             for {
               n <- cnt.nextN
-              _ <- csl.putStrLn(f"$n%03.0f info : $message")
+              _ <- csl.putStrLn(f"$n%03d info : $message")
             } yield {}
 
           override def warning(message: => String): UIO[Unit] =
             for {
               n <- cnt.nextN
-              _ <- csl.putStrLn(f"$n%03.0f warn : $message")
+              _ <- csl.putStrLn(f"$n%03d warn : $message")
             } yield {}
         }
 
@@ -195,15 +206,50 @@ object MyApp2 extends zio.App {
   val configLayer: RLayer[Console with system.System, Has[Config]] = ZLayer.fromEffect(for {
     path   <- zio.system.env("logPath")
     nTimes <- zio.system.env("nTimes")
+    //because toInt
     config <- ZIO(Config(path.getOrElse("log.txt"), nTimes.map(_.toInt).getOrElse(10)))
     _      <- zio.console.putStrLn(s"using $config")
   } yield config)
 
-  val loggerLayer: RLayer[Counter with Has[Config] with Clock, Logger] = ZLayer.fromFunction(_ => MyApp0.emptyLogger)
+  val loggerLayer: ZLayer[Has[Config] with Clock with Counter, Throwable, Logger] = {
+    def newPrinter(path: String): Task[PrintWriter] = ZIO(new PrintWriter(new FileOutputStream(new File(path), true)))
+
+    val printer: ZManaged[Has[Config], Throwable, PrintWriter] =
+      ZManaged.accessManaged[Has[Config]](env => ZManaged.fromAutoCloseable(newPrinter(env.get.logPath)))
+
+    def logger(prt: PrintWriter): URManaged[Has[Clock.Service] with Has[Counter.Service], Logger.Service] = {
+      def println(str: String): Task[Unit] = ZIO(prt.println(str))
+
+      val createLogger = for {
+        cnt <- ZIO.service[Counter.Service]
+        clk <- ZIO.service[Clock.Service]
+      } yield {
+        new Logger.Service {
+          override def info(message: => String): UIO[Unit] =
+            (for {
+              n <- cnt.nextN
+              t <- clk.currentDateTime
+              _ <- println(f"$n%03d info $t: $message")
+            } yield {}).ignore
+
+          override def warning(message: => String): UIO[Unit] =
+            (for {
+              n <- cnt.nextN
+              t <- clk.currentDateTime
+              _ <- println(f"$n%03d warn $t: $message")
+            } yield {}).ignore
+        }
+      }
+
+      createLogger.toManaged(_.info("closing logger"))
+    }
+
+    ZLayer.fromManaged(printer >>= logger)
+  }
 
   override def run(args: List[String]): URIO[zio.ZEnv, ExitCode] = {
     //RLayer[Console with system.System with Clock, Logger]
-    val providedLogger = (configLayer ++ counterLayer.fresh ++ ZLayer.identity[Clock]) >>> loggerLayer
+    val providedLogger = (configLayer ++ counterLayer.fresh ++ ZLayer.identity[Clock with Console]) >>> loggerLayer
 
     //RLayer[Console with system.System, Logger with Counter with Has[Config]]
     val customs = providedLogger ++ counterLayer ++ configLayer
