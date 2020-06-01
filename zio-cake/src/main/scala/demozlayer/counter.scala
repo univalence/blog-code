@@ -2,10 +2,9 @@ package demozlayer
 
 import demozlayer.counter.Counter
 import demozlayer.logger.Logger
-import izumi.reflect.Tag
 import zio.clock.Clock
 import zio.console.Console
-import zio.{ clock, console, ExitCode, Has, Layer, RIO, Schedule, UIO, ULayer, URIO, URLayer, ZIO, ZLayer, ZRef }
+import zio._
 
 object counter {
 
@@ -59,16 +58,16 @@ object Logic {
     } yield {}
 
   def countNTimes(n: Int): ZIO[Console with Counter, Nothing, Int] =
-    (counter.nextN >>= (i => zio.console.putStrLn(s"N = $i"))).repeat(Schedule.recurs(n))
+    (counter.nextN >>= (i => zio.console.putStrLn(s"N = $i"))).repeat(Schedule.recurs(n - 1))
 
   val startPrg: URIO[Logger, Unit] = logger.info("... starting ...")
 
-  val prg: RIO[Console with Clock with Logger with Counter, Unit] =
+  def prg(n: Int): RIO[Console with Clock with Logger with Counter, Unit] =
     for {
       _    <- startPrg
       name <- askUserName
       _    <- greet(name)
-      _    <- countNTimes(10)
+      _    <- countNTimes(n)
       _    <- logger.info("stopping")
     } yield {}
 }
@@ -85,13 +84,19 @@ object MyApp0 extends zio.App {
     override def getCount: UIO[Int] = ZIO.effectTotal(0)
   }
 
-  override def run(args: List[String]): ZIO[zio.ZEnv, Nothing, ExitCode] =
-    Logic.prg.provideSome[zio.ZEnv](zenv => zenv ++ Has(emptyCount) ++ Has(emptyLogger)).exitCode
+  override def run(args: List[String]): URIO[zio.ZEnv, ExitCode] = {
+    val prg: RIO[Console with Clock with Logger with Counter, Unit] = Logic.prg(10)
+    //type ZEnv = Clock with Console with System with Random with Blocking
+    val provided: RIO[zio.ZEnv, Unit] = prg.provideSome[zio.ZEnv](zenv => zenv ++ Has(emptyCount) ++ Has(emptyLogger))
+
+    //URIO[zio.ZEnv, ExitCode]
+    provided.exitCode
+  }
 }
 
 object MyApp1 extends zio.App {
 
-  override def run(args: List[String]): ZIO[zio.ZEnv, Nothing, ExitCode] =
+  override def run(args: List[String]): URIO[zio.ZEnv, ExitCode] =
     (for {
       csl <- ZIO.access[Console](_.get)
       n   <- ZRef.make(0)
@@ -116,7 +121,7 @@ object MyApp1 extends zio.App {
             } yield {}
         }
 
-        Logic.prg.provideSome[zio.ZEnv](zenv => zenv ++ Has(cnt) ++ Has(lgr))
+        Logic.prg(n = 10).provideSome[zio.ZEnv](zenv => zenv ++ Has(cnt) ++ Has(lgr))
       }
 
     } yield u).exitCode
@@ -159,7 +164,7 @@ object MyApp1Layer extends zio.App {
 
     val all = (ZLayer.identity[zio.ZEnv] ++ counterLayer) >+> loggerLayer
 
-    Logic.prg.provideLayer(all).exitCode
+    Logic.prg(n = 10).provideLayer(all).exitCode
 
   }
 
@@ -170,8 +175,43 @@ object MyApp1Layer extends zio.App {
  * écrire dans un fichier
  * faire un fresh sur le counter
  */
+
+case class Config(logPath: String, nTimes: Int)
+
 object MyApp2 extends zio.App {
 
-  override def run(args: List[String]): ZIO[zio.ZEnv, Nothing, ExitCode] = ???
+  val counterLayer: ULayer[Counter] = ZLayer.fromEffect(
+    ZRef
+      .make(0)
+      .map(
+        ref =>
+          new Counter.Service {
+            override def nextN: UIO[Int]    = ref.updateAndGet(_ + 1)
+            override def getCount: UIO[Int] = ref.get
+          }
+      )
+  )
+
+  val configLayer: RLayer[Console with system.System, Has[Config]] = ZLayer.fromEffect(for {
+    path   <- zio.system.env("logPath")
+    nTimes <- zio.system.env("nTimes")
+    config <- ZIO(Config(path.getOrElse("log.txt"), nTimes.map(_.toInt).getOrElse(10)))
+    _      <- zio.console.putStrLn(s"using $config")
+  } yield config)
+
+  val loggerLayer: RLayer[Counter with Has[Config] with Clock, Logger] = ZLayer.fromFunction(_ => MyApp0.emptyLogger)
+
+  override def run(args: List[String]): URIO[zio.ZEnv, ExitCode] = {
+    //RLayer[Console with system.System with Clock, Logger]
+    val providedLogger = (configLayer ++ counterLayer.fresh ++ ZLayer.identity[Clock]) >>> loggerLayer
+
+    //RLayer[Console with system.System, Logger with Counter with Has[Config]]
+    val customs = providedLogger ++ counterLayer ++ configLayer
+
+    //RIO[Console with Clock with Logger with Counter with Has[Config], Unit]
+    val prgUsingConfig = ZIO.access[Has[Config]](_.get.nTimes) >>= Logic.prg
+
+    prgUsingConfig.provideCustomLayer(customs).exitCode
+  }
 
 }
